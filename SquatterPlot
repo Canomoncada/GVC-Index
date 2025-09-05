@@ -1,0 +1,124 @@
+# Load readxl
+library(readxl)
+
+# Path to your file
+xlsx_path <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/Enhanced_GVC_Ultimate_Analysis.xlsx"
+
+# Read the sheet, skip = 1 to promote row 2 as headers
+Enhanced_GVC_Ultimate_Analysis <- read_excel(xlsx_path, sheet = "Enhanced GVC Analysis", skip = 1)
+
+# Open the data frame in RStudio Viewer
+View(Enhanced_GVC_Ultimate_Analysis)
+
+# Quick console check (prints first 10 rows in console)
+head(Enhanced_GVC_Ultimate_Analysis, 10)
+
+# If you just want to see the names of columns
+names(Enhanced_GVC_Ultimate_Analysis)
+
+
+
+# =================================================================
+# Financial Readiness Quadrant Plot: Real Data Workflow
+# =================================================================
+
+# 1. SETUP: LOAD REQUIRED PACKAGES
+message("Loading required packages...")
+
+req_packages <- c("dplyr", "ggplot2", "ggrepel", "scales", "readxl", "purrr")
+to_install <- setdiff(req_packages, rownames(installed.packages()))
+if (length(to_install) > 0) {
+  install.packages(to_install, repos = "https://cloud.r-project.org/")
+}
+purrr::walk(req_packages, ~ library(.x, character.only = TRUE))
+
+# 2. DATA IMPORT: READ EXCEL FILE
+xlsx_path <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/Enhanced_GVC_Ultimate_Analysis.xlsx"
+df_raw <- readxl::read_excel(xlsx_path, sheet = "Enhanced GVC Analysis", skip = 1)
+
+# 3. DATA CLEANING & PREPARATION
+df_clean <- df_raw %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::contains("Index"),
+      ~ suppressWarnings(as.numeric(.))
+    )
+  ) %>%
+  dplyr::mutate(
+    Regions = dplyr::case_when(
+      Countries %in% c("Estonia", "Latvia", "Lithuania") ~ "OECD",
+      TRUE ~ as.character(Regions)
+    )
+  ) %>%
+  dplyr::filter(Regions != "Other") %>%
+  dplyr::filter(
+    !is.na(`Financial Depth Index`) & !is.na(`Financial Reserves Index`)
+  )
+
+# 4. ANALYSIS: CALCULATE MEDIANS FOR QUADRANTS
+depth_med    <- stats::median(df_clean$`Financial Depth Index`,    na.rm = TRUE)
+reserves_med <- stats::median(df_clean$`Financial Reserves Index`, na.rm = TRUE)
+
+# 5. VISUALIZATION: CREATE THE GGPLOT2 PLOT
+region_colors <- c(
+  "OECD"  = "#003f5c",
+  "Africa"= "#7a5195",
+  "LAC"   = "#ef5675",
+  "ASEAN" = "#ffa600",
+  "CHINA" = "#488f31"
+)
+label_countries <- c("China", "Japan", "Germany", "USA", "Brazil", "South Africa", "India", "Singapore")
+df_plot <- df_clean %>%
+  mutate(label = if_else(Countries %in% label_countries, Countries, NA_character_))
+
+p <- ggplot(df_plot, aes(x = `Financial Depth Index`, y = `Financial Reserves Index`)) +
+  geom_vline(xintercept = depth_med, linetype = "dashed", color = "grey60", linewidth = 0.5) +
+  geom_hline(yintercept = reserves_med, linetype = "dashed", color = "grey60", linewidth = 0.5) +
+  geom_point(aes(color = Regions), size = 4, alpha = 0.8) +
+  ggrepel::geom_text_repel(aes(label = label), size = 3.5, na.rm = TRUE, seed = 123, max.overlaps = 15) +
+  scale_color_manual(values = region_colors, name = "Region") +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
+  scale_x_continuous(labels = scales::percent_format()) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Financial Readiness: Depth vs. Reserves",
+    subtitle = "Analysis of country financial metrics. Dashed lines represent median values.",
+    x = "Financial Depth Index",
+    y = "Financial Reserves Index",
+    caption = "Source: Enhanced GVC Ultimate Analysis"
+  ) +
+  annotate("text", x = 0.98, y = 0.98, label = "High Depth / High Reserves", hjust = 1, vjust = 1, size = 3.5, color = "grey40") +
+  annotate("text", x = 0.02, y = 0.98, label = "Low Depth / High Reserves",  hjust = 0, vjust = 1, size = 3.5, color = "grey40") +
+  annotate("text", x = 0.98, y = 0.02, label = "High Depth / Low Reserves",  hjust = 1, vjust = 0, size = 3.5, color = "grey40") +
+  annotate("text", x = 0.02, y = 0.02, label = "Low Depth / Low Reserves",   hjust = 0, vjust = 0, size = 3.5, color = "grey40") +
+  theme_minimal(base_family = "sans", base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 11, color = "grey50", margin = margin(b = 20)),
+    plot.caption = element_text(size = 8, color = "grey60", hjust = 0),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    plot.margin = margin(20, 20, 20, 20),
+    axis.title = element_text(size = 10, face = "bold"),
+    legend.title = element_text(face = "bold")
+  )
+
+print(p)
+
+# 6. EXPORT: SAVE THE PLOT TO FILES
+message("Saving plots to disk...")
+ggsave(
+  filename = "financial_readiness_quadrants.png",
+  plot = p,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+ggsave(
+  filename = "financial_readiness_quadrants.pdf",
+  plot = p,
+  width = 10,
+  height = 8
+)
+message("Script finished successfully.")
