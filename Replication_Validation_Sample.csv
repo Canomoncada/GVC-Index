@@ -1,0 +1,6 @@
+Country,Region,Internet Penetration Index,Trade to GDP Ratio Index,Financial Depth Index,Dataset_Type,Notes
+China,CHINA,0.699,0.073,0.841,Final_Normalized,Final normalized values for peer review validation
+Germany,OECD,0.901,0.19,N/A,Final_Normalized,Final normalized values for peer review validation
+Kenya,Africa,0.231,0.058,N/A,Final_Normalized,Final normalized values for peer review validation
+Singapore,ASEAN,0.932,0.84,N/A,Final_Normalized,Final normalized values for peer review validation
+United States,OECD,0.907,0.043,0.857,Final_Normalized,Final normalized values for peer review validation
