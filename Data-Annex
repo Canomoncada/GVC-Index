@@ -814,3 +814,179 @@ cat("All transparency and documentation issues addressed!\n")
 cat("Ready for academic peer review submission!\n")
 cat("Created: 2025-01-05 01:27:23 by Canomoncada\n")
 cat("GitHub: Canomoncada/GVC_AFRICA ecosystem\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ================================================================
+# GVC ULTIMATE PRODUCTION PIPELINE (2025) — PART 2: METADATA, EXPORT, DOCUMENTATION
+# ================================================================
+# Author: Anthony S Cano Moncada
+# GitHub: Canomoncada/GVC-Index
+# Timestamp: 2025-09-06 17:03:30 UTC
+# ================================================================
+
+library(openxlsx)
+library(jsonlite)
+library(tidyr)
+
+# ----------- 1. Create Metadata Table -----------
+indicator_metadata <- data.frame(
+  Indicator_Code = c(
+    "INT_PEN", "MOB_CON", "TRD_GDP", "LOG_PER", "FIN_RES", "FIN_DEP", "CO2_INT", "BUS_RDY", "POL_STB",
+    "TECH_AIPI", "ERI", "EII", "GFRI"
+  ),
+  Indicator_Name = c(
+    "Internet Penetration Index", "Mobile Connectivity Index", "Trade to GDP Ratio Index", "Logistics Performance Index",
+    "Financial Reserves Index", "Financial Depth Index", "CO2 Intensity Index", "Business Ready Index", "Political Stability Index",
+    "AI Performance Index (TECH_AIPI)", "Electricity Readiness Index (ERI)", "Energy Infrastructure Index (EII)", "Global Financial Readiness Index (GFRI)"
+  ),
+  Pillar = c(
+    "Technology", "Technology", "Trade & Investment", "Trade & Investment",
+    "Financial", "Financial", "Sustainability", "Institutional", "Institutional",
+    "Technology", "Institutional", "Sustainability", "Financial"
+  ),
+  Source = c(
+    "ITU", "GSMA", "World Bank", "World Bank LPI",
+    "World Bank", "World Bank", "EDGAR", "World Bank Doing Business", "World Bank Governance",
+    "IMF/Custom", "Custom", "Custom", "World Bank/Custom"
+  ),
+  Units = c(
+    "Percentage of population", "Index (0-1)", "Ratio (0-1)", "Index (0-1)",
+    "Index (0-1)", "Index (0-1)", "Index (0-1)", "Index (0-1)", "Index (0-1)",
+    "Index (0-1)", "Index (0-1)", "Index (0-1)", "Index (0-1)"
+  ),
+  Reference_Period = c(
+    "2019-2023", "2023", "2019-2023", "2023",
+    "2024", "2024", "2023", "2020", "2020-2023",
+    "2023", "2024", "2024", "2024"
+  ),
+  Normalization_Method = rep("Min-Max (0-1 scale)", 13),
+  Direction = rep("Higher is better", 13),
+  Missing_Data_Treatment = rep("Excluded if missing", 13),
+  Weighting_Justification = rep("Equal weighting; PCA sensitivity optional", 13),
+  stringsAsFactors = FALSE
+)
+
+# ----------- 2. Coverage & Validation Sample -----------
+coverage_analysis <- gvc_ultimate %>%
+  group_by(Region) %>%
+  summarise(
+    Total_Countries = n(),
+    Coverage_Percent = round(mean(rowSums(. != "N/A") / (ncol(.) - 2)) * 100, 1)
+  )
+
+validation_sample <- gvc_ultimate %>%
+  filter(Country %in% c("United States", "China", "Germany", "Kenya", "Singapore"))
+
+# ----------- 3. Excel Export (Main, Metadata, Coverage, Validation) -----------
+wb <- createWorkbook()
+addWorksheet(wb, "GVC Ultimate Data")
+writeData(wb, "GVC Ultimate Data", gvc_ultimate)
+
+addWorksheet(wb, "Metadata")
+writeData(wb, "Metadata", indicator_metadata)
+
+addWorksheet(wb, "Coverage")
+writeData(wb, "Coverage", coverage_analysis)
+
+addWorksheet(wb, "ValidationSample")
+writeData(wb, "ValidationSample", validation_sample)
+
+saveWorkbook(wb, file.path(export_path, "GVC_Ultimate_Production_Full.xlsx"), overwrite = TRUE)
+
+# ----------- 4. CSV Replication Files -----------
+write_csv(gvc_ultimate, file.path(export_path, "GVC_Ultimate_Production_227_Countries.csv"))
+write_csv(gvc_ultimate_subset, file.path(export_path, "GVC_Ultimate_Production_138_Countries.csv"))
+write_csv(indicator_metadata, file.path(export_path, "GVC_Ultimate_Indicator_Metadata.csv"))
+write_csv(coverage_analysis, file.path(export_path, "GVC_Ultimate_Coverage.csv"))
+write_csv(validation_sample, file.path(export_path, "GVC_Ultimate_ValidationSample.csv"))
+
+# ----------- 5. JSON Summary -----------
+ultimate_summary <- list(
+  timestamp = Sys.time(),
+  created_by = "Canomoncada",
+  github_activity = list(
+    primary_repo = "Canomoncada/GVC-Index"
+  ),
+  version = "Ultimate Production Pipeline - Peer Review Ready",
+  methodology = list(
+    normalization = "Min-Max (0-1 scale)",
+    reference_period = "2019-2024",
+    weighting = "Equal weighting (PCA sensitivity optional)",
+    missing_data = "Excluded if missing"
+  ),
+  transparency_measures = list(
+    metadata_provided = TRUE,
+    coverage_documented = TRUE,
+    validation_sample = TRUE,
+    methodology_documented = TRUE,
+    replication_package = TRUE,
+    github_tracked = TRUE
+  ),
+  results = list(
+    countries_227 = nrow(gvc_ultimate),
+    countries_138 = nrow(gvc_ultimate_subset),
+    total_indicators = ncol(gvc_ultimate) - 2,
+    pillars = unique(indicator_metadata$Pillar)
+  ),
+  peer_review_improvements = list(
+    "Complete metadata/documentation",
+    "Temporal alignment transparency",
+    "Weighting methodology documentation",
+    "Missing data handling transparency",
+    "Selection neutrality documentation",
+    "Validation checks",
+    "Replication package exports"
+  ),
+  export_path = export_path
+)
+
+write_json(ultimate_summary, file.path(export_path, "GVC_Ultimate_Production_Summary.json"), pretty = TRUE, auto_unbox = TRUE)
+
+cat("GVC Ultimate Production Pipeline Export Complete!\n")
+cat("All files ready for peer review and replication.\n")
+
+
+
