@@ -1,0 +1,971 @@
+# ================================================================
+# Pillar - Financial Readiness
+# Global Financial Readiness Index (GFRI) — 2024 Final Pipeline 
+# Derived from: World Bank Global Findex Database
+#
+# What this script does (with 2024 enforced):
+#   A) Read Findex Excel → keep national totals for 2024 ONLY (error if missing)
+#   B) Select finalized indicators (Access & Usage)
+#   C) Clean and normalize indicators (0–100% → 0–1)
+#   D) Build sub-indices: Access_n, Usage_n
+#   E) Build final composite: GFRI (equal-weight Access & Usage)
+#   F) Export three layers: indicators-only, pre-index (with GFRI), final lean file
+# ================================================================
+
+suppressPackageStartupMessages({
+  library(readxl)
+  library(readr)
+  library(dplyr)
+  library(stringr)
+})
+
+# -----------------------------
+# PATHS (EDIT IF NEEDED)
+# -----------------------------
+xlsx_path     <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/GlobalFindexDatabase2025 (1).xlsx"
+export_dir    <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/export"
+preindex_dir  <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/cleaned-Data/pre-index"
+final_dir     <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/cleaned-Data/FINAL"
+
+dir.create(export_dir,   recursive = TRUE, showWarnings = FALSE)
+dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
+
+# -----------------------------
+# SETTINGS — force 2024 and stop if unavailable
+# -----------------------------
+target_year <- 2024
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+
+## Convert strings like "34,5%" / " 27 " to numeric
+to_num <- function(x) {
+  if (is.numeric(x)) return(x)
+  x <- gsub(",", "", as.character(x), fixed = TRUE)
+  x <- gsub("%", "", x, fixed = TRUE)
+  x <- trimws(x)
+  suppressWarnings(as.numeric(x))
+}
+
+## Clip percentages to [0,100]
+clip_pct <- function(v) {
+  x <- to_num(v)
+  x[x < 0]   <- 0
+  x[x > 100] <- 100
+  x
+}
+
+## Min–Max normalize to [0,1] across countries
+normalize_minmax <- function(v) {
+  x <- to_num(v)
+  if (all(is.na(x))) return(rep(NA_real_, length(x)))
+  lo <- suppressWarnings(min(x, na.rm = TRUE))
+  hi <- suppressWarnings(max(x, na.rm = TRUE))
+  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(x)))
+  (x - lo) / (hi - lo)
+}
+
+## Pick first existing column among aliases (e.g., digital payments naming)
+pick_first_existing <- function(df, candidates, new_name) {
+  have <- candidates[candidates %in% names(df)]
+  df[[new_name]] <- if (length(have) == 0) NA_real_ else to_num(df[[have[1]]])
+  df
+}
+
+# ================================================================
+# A) READ EXCEL → KEEP NATIONAL TOTALS FOR 2024 (FAIL IF MISSING)
+# ================================================================
+message("Reading Global Findex Excel…")
+raw <- read_excel(xlsx_path, sheet = "Data")
+
+# Drop any non-data rows by requiring numeric year; standardize groups
+data <- raw %>%
+  mutate(.yr = suppressWarnings(as.numeric(year))) %>%
+  filter(!is.na(.yr)) %>%
+  select(-.yr) %>%
+  mutate(
+    group  = ifelse(is.na(group),  "all", tolower(trimws(group))),
+    group2 = ifelse(is.na(group2), "all", tolower(trimws(group2)))
+  )
+
+# Validate that 2024 exists
+avail_years <- sort(unique(suppressWarnings(as.numeric(data$year))))
+message("Available survey years: ", paste(avail_years, collapse = ", "))
+if (!any(avail_years == target_year)) {
+  stop(paste0("❌ Requested year ", target_year, " not found in file. ",
+              "Please verify your source or update the file with 2024 data."))
+}
+
+# Filter to national totals for 2024
+df <- data %>%
+  filter(year == target_year, group == "all", group2 == "all")
+
+stopifnot("❌ No national-total rows for 2024. Check 'group'/'group2' values." = nrow(df) > 0)
+
+# ================================================================
+# B) SELECT FINALIZED INDICATORS (Access & Usage)
+#    Access: account_any, account_mobile
+#    Usage : borrow_any, save_formal, digital_payments (alias-robust)
+# ================================================================
+df <- df %>%
+  select(
+    countrynewwb, codewb, year, regionwb24_hi, incomegroupwb24, pop_adult,
+    account.t.d, mobileaccount.t.d, borrow.any.t.d, fin4.d,
+    everything()
+  ) %>%
+  rename(
+    country        = countrynewwb,
+    code           = codewb,
+    region         = regionwb24_hi,
+    incomegroup    = incomegroupwb24,
+    account_any    = account.t.d,         # % adults with any account
+    account_mobile = mobileaccount.t.d,   # % adults with mobile money account
+    borrow_any     = borrow.any.t.d,      # % adults borrowed any money
+    save_formal    = fin4.d               # % adults saved at a financial institution
+  )
+
+# Try common aliases for digital payments
+digital_candidates <- c("digital_payments", "pay.digital.t.d", "fin11_2a", "fin11_2b", "pay.digital.any.t.d")
+df <- pick_first_existing(df, digital_candidates, "digital_payments")
+
+# ================================================================
+# C) CLEAN & NORMALIZE INDICATORS (0–100% → 0–1)
+# ================================================================
+indicators <- df %>%
+  mutate(
+    country          = str_trim(as.character(country)),
+    code             = str_trim(as.character(code)),
+    region           = str_trim(as.character(region)),
+    incomegroup      = str_trim(as.character(incomegroup)),
+    pop_adult        = to_num(pop_adult),
+
+    # RAW % values (validated to [0,100])
+    account_any      = clip_pct(account_any),
+    account_mobile   = clip_pct(account_mobile),
+    borrow_any       = clip_pct(borrow_any),
+    save_formal      = clip_pct(save_formal),
+    digital_payments = clip_pct(digital_payments),
+
+    # Normalized 0–1 values (for index building)
+    account_any_n      = normalize_minmax(account_any),
+    account_mobile_n   = normalize_minmax(account_mobile),
+    borrow_any_n       = normalize_minmax(borrow_any),
+    save_formal_n      = normalize_minmax(save_formal),
+    digital_payments_n = normalize_minmax(digital_payments)
+  ) %>%
+  arrange(country) %>%
+  distinct(country, .keep_all = TRUE) %>%
+  select(
+    country, code, year, region, incomegroup, pop_adult,
+    # indicators (RAW %)
+    account_any, account_mobile, borrow_any, save_formal, digital_payments,
+    # indicators (normalized 0–1)
+    account_any_n, account_mobile_n, borrow_any_n, save_formal_n, digital_payments_n
+  )
+
+# Diagnostics for coverage
+message("Countries in indicators (2024): ", nrow(indicators))
+missing_raw <- sapply(indicators[, c("account_any","account_mobile","borrow_any","save_formal","digital_payments")],
+                      function(x) sum(is.na(x)))
+message("Missing (raw %) by indicator:"); print(missing_raw)
+
+# Export indicators-only (2024)
+ind_out <- file.path(export_dir, "Findex_FINALIZED_indicators_2024.csv")
+write_csv(indicators, ind_out)
+message("✅ Exported INDICATORS-ONLY: ", ind_out)
+
+# ================================================================
+# D) PRE-INDEX: BUILD SUB-INDICES (Access_n, Usage_n) + FINAL GFRI
+# ================================================================
+x <- read_csv(ind_out, show_col_types = FALSE)
+
+# Validate normalized columns exist
+need <- c("account_any_n","account_mobile_n","borrow_any_n","save_formal_n","digital_payments_n")
+miss <- setdiff(need, names(x))
+if (length(miss) > 0) stop("❌ Missing normalized columns: ", paste(miss, collapse = ", "))
+
+key_cols <- intersect(c("country","code","year","region","incomegroup","pop_adult"), names(x))
+
+preindex <- x %>%
+  mutate(
+    # Access sub-index: equal weight, robust to 1 indicator present
+    access_k = (!is.na(account_any_n)) + (!is.na(account_mobile_n)),
+    Access_n = dplyr::case_when(
+      access_k == 2 ~ rowMeans(cbind(account_any_n, account_mobile_n), na.rm = TRUE),
+      access_k == 1 ~ ifelse(!is.na(account_any_n), account_any_n, account_mobile_n),
+      TRUE          ~ NA_real_
+    ),
+
+    # Usage sub-index: equal weight across up to 3 components
+    usage_k = (!is.na(borrow_any_n)) + (!is.na(save_formal_n)) + (!is.na(digital_payments_n)),
+    Usage_n = dplyr::case_when(
+      usage_k >= 1 ~ rowMeans(cbind(borrow_any_n, save_formal_n, digital_payments_n), na.rm = TRUE),
+      TRUE         ~ NA_real_
+    ),
+
+    # Final composite (GFRI): equal-weight mean of Access_n & Usage_n
+    GFRI = dplyr::case_when(
+      !is.na(Access_n) & !is.na(Usage_n) ~ (Access_n + Usage_n) / 2,
+      !is.na(Access_n) &  is.na(Usage_n) ~ Access_n,
+       is.na(Access_n) & !is.na(Usage_n) ~ Usage_n,
+      TRUE                               ~ NA_real_
+    )
+  ) %>%
+  select(all_of(key_cols),
+         # final composite + sub-indices
+         GFRI, Access_n, Usage_n,
+         # components (normalized) for audit
+         account_any_n, account_mobile_n, borrow_any_n, save_formal_n, digital_payments_n,
+         # components (raw %) for audit
+         account_any,   account_mobile,   borrow_any,   save_formal,   digital_payments) %>%
+  arrange(country)
+
+message("Rows (countries) in PRE-INDEX (2024): ", nrow(preindex))
+message("Coverage (non-missing): Access_n=", sum(!is.na(preindex$Access_n)),
+        " | Usage_n=", sum(!is.na(preindex$Usage_n)),
+        " | GFRI=",     sum(!is.na(preindex$GFRI)))
+
+# Export pre-index (with final composite)
+pre_out <- file.path(preindex_dir, "GlobalFindex_FinAccessUsage_preindex_2024_GFRI.csv")
+write_csv(preindex, pre_out)
+message("✅ Exported PRE-INDEX + GFRI: ", pre_out)
+
+# ================================================================
+# E) FINAL LEAN EXPORT — PILLAR-READY (GFRI + SUB-INDICES)
+# ================================================================
+final <- preindex %>%
+  select(country, code, year, region, incomegroup,
+         GFRI, Access_n, Usage_n)
+
+final_out <- file.path(final_dir, "GlobalFinancialReadinessIndex_GFRI_2024.csv")
+write_csv(final, final_out)
+message("✅ Exported FINAL composite (pillar-ready): ", final_out)
+
+# ================================================================
+# SUMMARY
+# ================================================================
+message("\nSummary (2024):")
+message("• Indicators-only (selected & normalized): ", ind_out)
+message("• Pre-index (components + Access/Usage + GFRI): ", pre_out)
+message("• FINAL (lean, pillar-ready): ", final_out)
+
+
+
+
+
+
+
+
+
+
+
+
+#2###################################
+
+
+# ================================================================
+# Pillar - Trade & Investment 
+# Tariff Restrictiveness Index (TRI) — Final Pre-Index Pipeline
+# Mirrors GFRI pipeline structure (no extra harmonization)
+# Source: WTO IDB/CTS indicator extracts
+#
+# Steps:
+#   A) Read 6 WTO Excel files
+#   B) Tidy (detect 'Reporting Economy'), reshape long
+#   C) Restrict to 2019–2024 and average per country
+#   D) Normalize to [0,1] (invert duties; keep duty-free as-is)
+#   E) Build sub-indices: TariffLevel_n, DutyFree_n
+#   F) TRI = 0.5*TariffLevel_n + 0.5*DutyFree_n
+#   G) Export: indicators-only, pre-index, final lean
+# ================================================================
+
+suppressPackageStartupMessages({
+  library(readxl)
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(purrr)
+})
+
+# -----------------------------
+# PATHS (same as GFRI)
+# -----------------------------
+tariff_dir   <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/Tariff"
+export_dir   <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/export"
+preindex_dir <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/cleaned-Data/pre-index"
+final_dir    <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/cleaned-Data/FINAL"
+
+dir.create(export_dir,   recursive = TRUE, showWarnings = FALSE)
+dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
+
+# -----------------------------
+# SETTINGS
+# -----------------------------
+period_min <- 2019
+period_max <- 2024
+valid_year_min <- 2011  # WTO files typically 2011–2024
+valid_year_max <- 2024
+
+# Indicator → file map (your files)
+tariff_files <- list(
+  Simple   = file.path(tariff_dir, "WtoData_20250905143957.xlsx"), # MFN simple avg (%)
+  Weighted = file.path(tariff_dir, "WtoData_20250905144029.xlsx"), # MFN trade-weighted avg (%)
+  DutyFree = file.path(tariff_dir, "WtoData_20250905144049.xlsx"), # MFN duty-free share (%)
+  Ag       = file.path(tariff_dir, "WtoData_20250905144140.xlsx"), # MFN Ag simple avg (%)
+  NonAg    = file.path(tariff_dir, "WtoData_20250905144207.xlsx"), # MFN Non-Ag simple avg (%)
+  Max      = file.path(tariff_dir, "WtoData_20250905144310.xlsx")  # MFN maximum duty (%)
+)
+# (WtoData_20250905143821.xlsx kept out unless needed.)
+
+# -----------------------------
+# HELPERS (GFRI-style)
+# -----------------------------
+to_num <- function(x) {
+  if (is.numeric(x)) return(x)
+  x <- as.character(x)
+  x <- gsub(",", "", x, fixed = TRUE)
+  x <- gsub("%", "", x, fixed = TRUE)
+  x <- trimws(x)
+  x[x %in% c("", "..", "...", "—", "–")] <- NA
+  suppressWarnings(as.numeric(x))
+}
+
+normalize_minmax <- function(v) {
+  x <- to_num(v)
+  if (all(is.na(x))) return(rep(NA_real_, length(x)))
+  lo <- suppressWarnings(min(x, na.rm = TRUE))
+  hi <- suppressWarnings(max(x, na.rm = TRUE))
+  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(x)))
+  (x - lo) / (hi - lo)
+}
+
+find_header_row <- function(df) {
+  first_col <- tolower(trimws(as.character(df[[1]])))
+  hit <- which(first_col %in% c("reporting economy", "reporting economy:"))
+  if (length(hit) == 0) hit <- which(grepl("reporting\\s*economy", first_col, perl = TRUE))
+  if (length(hit) == 0) stop("❌ Could not find 'Reporting Economy' header row.")
+  hit[1]
+}
+
+# ---- Hardened tidy: guards against NA/blank headers & duplicated names
+tidy_tariff <- function(path, indicator_label, sheet = 1) {
+  df  <- read_excel(path, sheet = sheet, col_names = FALSE)
+  hdr <- find_header_row(df)
+  
+  # Raw header cells after col 1
+  hdr_cells <- as.character(unlist(df[hdr, -1]))
+  # Parse candidate years, keep only valid 4-digit within range
+  years <- suppressWarnings(as.integer(gsub("[^0-9]", "", hdr_cells)))
+  valid <- which(!is.na(years) & years >= valid_year_min & years <= valid_year_max)
+  
+  if (length(valid) == 0) stop("❌ No valid year columns detected in: ", basename(path))
+  
+  # Build a clean rectangular slice: country + selected year columns
+  # shift by 1 because we dropped the first column in hdr_cells
+  cols_keep <- c(1, valid + 1)
+  df2 <- df[(hdr + 1):nrow(df), cols_keep, drop = FALSE]
+  
+  # Assign safe names: "country", then numeric years as strings
+  nm <- c("country", as.character(years[valid]))
+  # Make absolutely unique to satisfy tidyr
+  nm <- make.unique(nm, sep = "_")
+  names(df2) <- nm
+  
+  # Some WTO sheets may have "Notes" or "Source" trailing rows; drop those where all year cols are NA
+  yr_cols <- nm[-1]
+  all_na_row <- apply(df2[, yr_cols, drop = FALSE], 1, function(r) all(is.na(to_num(r))))
+  df2 <- df2[!all_na_row, , drop = FALSE]
+  
+  # Long
+  df2 %>%
+    pivot_longer(all_of(yr_cols), names_to = "year", values_to = "value") %>%
+    mutate(
+      country  = str_trim(as.character(df2$country[rep(seq_len(nrow(df2)), each = length(yr_cols))])),
+      year     = suppressWarnings(as.integer(year)),
+      value    = to_num(value),
+      indicator = indicator_label
+    ) %>%
+    filter(!is.na(country), country != "", !is.na(year))
+}
+
+# ================================================================
+# A–C) READ → TIDY → AVERAGE 2019–2024
+# ================================================================
+message("Reading WTO tariff indicators and averaging ", period_min, "–", period_max, "…")
+
+tariff_long <- map2_df(names(tariff_files), tariff_files, \(ind, fp) {
+  if (!file.exists(fp)) stop("❌ Missing file: ", fp)
+  out <- tidy_tariff(fp, ind)
+  if (nrow(out) == 0) stop("❌ No rows after tidy for file: ", basename(fp))
+  out
+})
+
+tariff_avg <- tariff_long %>%
+  filter(year >= period_min, year <= period_max) %>%
+  group_by(country, indicator) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = indicator, values_from = avg_value)
+
+# ================================================================
+# D) NORMALIZE (duties inverted; duty-free not inverted)
+# ================================================================
+tariff_norm <- tariff_avg %>%
+  mutate(
+    Simple_n   = 1 - normalize_minmax(Simple),     # lower duty = better
+    Weighted_n = 1 - normalize_minmax(Weighted),
+    Ag_n       = 1 - normalize_minmax(Ag),
+    NonAg_n    = 1 - normalize_minmax(NonAg),
+    Max_n      = 1 - normalize_minmax(Max),
+    DutyFree_n =      normalize_minmax(DutyFree)   # higher duty-free = better
+  )
+
+# ================================================================
+# E) PRE-INDEX SUB-INDICES + TRI (GFRI-style)
+# ================================================================
+preindex <- tariff_norm %>%
+  mutate(
+    level_k = rowSums(!is.na(across(c(Simple_n, Weighted_n, Ag_n, NonAg_n, Max_n)))),
+    TariffLevel_n = dplyr::case_when(
+      level_k >= 1 ~ rowMeans(across(c(Simple_n, Weighted_n, Ag_n, NonAg_n, Max_n)), na.rm = TRUE),
+      TRUE         ~ NA_real_
+    ),
+    TRI = dplyr::case_when(
+      !is.na(TariffLevel_n) & !is.na(DutyFree_n) ~ (TariffLevel_n + DutyFree_n) / 2,
+      !is.na(TariffLevel_n) &  is.na(DutyFree_n) ~ TariffLevel_n,
+      is.na(TariffLevel_n) & !is.na(DutyFree_n) ~ DutyFree_n,
+      TRUE                                       ~ NA_real_
+    )
+  ) %>%
+  arrange(country)
+
+# ================================================================
+# F) EXPORTS — indicators-only, pre-index, final
+# ================================================================
+indicators_only <- preindex %>%
+  select(
+    country,
+    # raw averaged values
+    Simple, Weighted, DutyFree, Ag, NonAg, Max,
+    # normalized
+    Simple_n, Weighted_n, DutyFree_n, Ag_n, NonAg_n, Max_n
+  )
+
+ind_out <- file.path(export_dir, "WTO_Tariff_indicators_avg_2019_2024.csv")
+write_csv(indicators_only, ind_out)
+message("✅ Exported INDICATORS-ONLY: ", ind_out)
+
+pre_out_df <- preindex %>%
+  select(
+    country,
+    TariffLevel_n, DutyFree_n, TRI,
+    Simple_n, Weighted_n, Ag_n, NonAg_n, Max_n
+  )
+
+pre_out <- file.path(preindex_dir, "WTO_Tariff_TRI_preindex_2019_2024.csv")
+write_csv(pre_out_df, pre_out)
+message("✅ Exported PRE-INDEX + TRI: ", pre_out)
+
+final_df <- preindex %>%
+  select(country, TRI)
+
+final_out <- file.path(final_dir, "TariffRestrictivenessIndex_TRI_2019_2024.csv")
+write_csv(final_df, final_out)
+message("✅ Exported FINAL composite (pillar-ready): ", final_out)
+
+# ================================================================
+# SUMMARY
+# ================================================================
+message("\nSummary:")
+message("• Indicators-only: ", ind_out)
+message("• Pre-index (sub-indices + TRI): ", pre_out)
+message("• FINAL lean: ", final_out)
+
+
+
+
+
+
+
+
+
+
+#3#####################################################################
+
+
+
+
+# ================================================================
+# Pillar - Institutional & Geopolitical Resilience
+
+# ERI scoring with dynamic (drop & re-normalize) weights — 0–1 scale
+# Works with your existing `eri_long` built from non-empty sheets
+# ================================================================
+
+# ---- settings ----
+target_year   <- 2024L
+cf_solar      <- 0.20  # CFs only used if the sheet exists
+cf_wind       <- 0.35
+winsor_probs  <- c(0.05, 0.95)
+
+# Pillar target weights (will be re-normalized per row if needed)
+pillar_weights <- c(clean = 0.40, flex = 0.30, policy = 0.30)
+
+# Sub-bucket target weights (also re-normalized per row if needed)
+w_clean  <- c(hydro_share = 0.40, vre_eq_share = 0.60)
+w_flex   <- c(bess_per_twh = 1.00)
+w_policy <- c(ccus_per_twh = 0.50, carbon_price = 0.50)  # carbon_price may be missing
+
+# ---- helpers ----
+winsorize_vec <- function(x, probs = c(0.05, 0.95)) {
+  if (all(is.na(x))) return(x)
+  qs <- stats::quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
+  pmin(pmax(x, qs[1]), qs[2])
+}
+
+normalize_minmax_01 <- function(v) {
+  x <- v
+  if (all(is.na(x))) return(rep(NA_real_, length(x)))
+  lo <- min(x, na.rm = TRUE); hi <- max(x, na.rm = TRUE)
+  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(x)))
+  (x - lo) / (hi - lo)
+}
+
+weighted_bucket_dynamic <- function(values_named, weights_named) {
+  # drop NAs and weights that don't exist; re-normalize remaining weights
+  present <- names(values_named)[!is.na(values_named)]
+  if (length(present) == 0) return(NA_real_)
+  ww <- weights_named[present]
+  ww <- ww / sum(ww)
+  sum(values_named[present] * ww)
+}
+
+# ---- (1) Build 2024 features from eri_long ----
+# Note: this is robust to missing indicators (e.g., Wind capacity or Carbon price absent)
+features_2024 <- eri_long %>%
+  dplyr::filter(Year == target_year) %>%
+  tidyr::pivot_wider(
+    id_cols  = Country,
+    names_from  = Variable,
+    values_from = Value,
+    values_fn   = list(Value = ~ suppressWarnings(mean(.x, na.rm = TRUE)))
+  ) %>%
+  # Ensure columns exist even if the sheet was absent
+  dplyr::mutate(
+    `Electricity generation` = if (!"Electricity generation" %in% names(.)) NA_real_ else `Electricity generation`,
+    `Hydro generation`       = if (!"Hydro generation"       %in% names(.)) NA_real_ else `Hydro generation`,
+    `Solar capacity`         = if (!"Solar capacity"         %in% names(.)) NA_real_ else `Solar capacity`,
+    `Wind capacity`          = if (!"Wind capacity"          %in% names(.)) NA_real_ else `Wind capacity`,
+    `BESS capacity`          = if (!"BESS capacity"          %in% names(.)) NA_real_ else `BESS capacity`,
+    `CCUS capacity`          = if (!"CCUS capacity"          %in% names(.)) NA_real_ else `CCUS capacity`,
+    `Carbon price`           = if (!"Carbon price"           %in% names(.)) NA_real_ else `Carbon price`
+  ) %>%
+  dplyr::rename(
+    Total_gen_TWh = `Electricity generation`,
+    Hydro_TWh     = `Hydro generation`,
+    Solar_GW      = `Solar capacity`,
+    Wind_GW       = `Wind capacity`,
+    BESS_MW       = `BESS capacity`,
+    CCUS_Mt       = `CCUS capacity`,
+    Carbon_price  = `Carbon price`
+  ) %>%
+  # Derived indicators; use available components only
+  dplyr::mutate(
+    Hydro_share = dplyr::if_else(Total_gen_TWh > 0, Hydro_TWh / Total_gen_TWh, NA_real_),
+    
+    # VRE equivalent TWh from capacity (only solar/wind that exist)
+    VREeq_TWh = {
+      solar_twh <- if (!all(is.na(Solar_GW))) (Solar_GW * cf_solar * 8760) / 1000 else 0
+      wind_twh  <- if (!all(is.na(Wind_GW)))  (Wind_GW  * cf_wind  * 8760) / 1000 else 0
+      # if one tech is fully missing (all NA), its term contributes 0
+      solar_twh[is.na(solar_twh)] <- 0
+      wind_twh[is.na(wind_twh)]   <- 0
+      solar_twh + wind_twh
+    },
+    VREeq_share = dplyr::if_else(Total_gen_TWh > 0, VREeq_TWh / Total_gen_TWh, NA_real_),
+    
+    BESS_per_TWh = dplyr::if_else(Total_gen_TWh > 0, BESS_MW / Total_gen_TWh, NA_real_),
+    CCUS_per_TWh = dplyr::if_else(Total_gen_TWh > 0, CCUS_Mt  / Total_gen_TWh, NA_real_)
+  )
+
+# ---- (2) Normalize indicators (winsorize then min-max -> 0..1) ----
+# Decide which indicators actually exist (non-all-NA)
+indicator_defs <- c(
+  "Hydro_share",
+  "VREeq_share",
+  "BESS_per_TWh",
+  "CCUS_per_TWh",
+  "Carbon_price"
+)
+
+normed <- features_2024
+for (ind in indicator_defs) {
+  if (!ind %in% names(normed)) {
+    normed[[paste0(ind, "_n01")]] <- NA_real_
+    next
+  }
+  v <- normed[[ind]]
+  if (all(is.na(v))) {
+    normed[[paste0(ind, "_n01")]] <- NA_real_
+  } else {
+    v_w <- winsorize_vec(v, winsor_probs)
+    normed[[paste0(ind, "_n01")]] <- normalize_minmax_01(v_w)
+  }
+}
+
+# ---- (3) Sub-scores with dynamic re-weighting per country ----
+normed <- normed %>%
+  rowwise() %>%
+  mutate(
+    # CLEAN pillar (drop missing, re-weight)
+    score_clean = weighted_bucket_dynamic(
+      c(
+        hydro_share = Hydro_share_n01,
+        vre_eq_share = VREeq_share_n01
+      ),
+      w_clean
+    ),
+    
+    # FLEX pillar
+    score_flex = weighted_bucket_dynamic(
+      c(
+        bess_per_twh = BESS_per_TWh_n01
+      ),
+      w_flex
+    ),
+    
+    # POLICY pillar (carbon_price often missing; drop+re-weight to CCUS only if needed)
+    score_policy = weighted_bucket_dynamic(
+      c(
+        ccus_per_twh = CCUS_per_TWh_n01,
+        carbon_price = Carbon_price_n01
+      ),
+      w_policy
+    )
+  ) %>%
+  ungroup()
+
+# ---- (4) Final ERI score (0..1) with dynamic pillar re-weighting per country ----
+normed$ERI_0_1 <- apply(normed[, c("score_clean", "score_flex", "score_policy")], 1, function(rr) {
+  names(rr) <- c("clean", "flex", "policy")
+  m <- !is.na(rr)
+  if (!any(m)) return(NA_real_)
+  ww <- pillar_weights[m] / sum(pillar_weights[m])
+  sum(rr[m] * ww)
+})
+
+# (optional) also a 0–100 version, if you want to export alongside
+normed$ERI_0_100 <- normed$ERI_0_1 * 100
+
+# ---- (5) Tidy output ----
+eri_scores_2024 <- normed %>%
+  dplyr::transmute(
+    Country,
+    Year = target_year,
+    Hydro_share,        VREeq_share,        BESS_per_TWh,        CCUS_per_TWh,        Carbon_price,
+    Hydro_share_n01,    VREeq_share_n01,    BESS_per_TWh_n01,    CCUS_per_TWh_n01,    Carbon_price_n01,
+    score_clean, score_flex, score_policy,
+    ERI_0_1, ERI_0_100
+  ) %>%
+  dplyr::arrange(desc(ERI_0_1))
+
+message("\n✅ ERI scores computed (0–1 and 0–100). Preview:")
+print(head(eri_scores_2024, 10))
+
+# ---- (6) Save (optional) ----
+# readr::write_csv(eri_scores_2024, file.path(export_dir, "ERI_scores_2024_0to1_and_0to100.csv"))
+
+
+# ================================================================
+# Save outputs to pre-index + final folders (original structure)
+# ================================================================
+
+# Derive base dir from the Excel file path, then mirror your structure
+base_dir     <- dirname(file_path)  # "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
+preindex_dir <- file.path(base_dir, "cleaned-Data", "pre-index")
+final_dir    <- file.path(base_dir, "cleaned-Data", "FINAL")
+
+dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
+
+# 1) Pre-index inputs (the long, tidy data you read for 2020–2024)
+#    If your working long df is named something else, replace `eri_long` below.
+inputs_path <- file.path(preindex_dir, "ERI_inputs_long_2020_2024.csv")
+readr::write_csv(eri_long, inputs_path)
+
+# 2) Final scores (0–1 and 0–100 for 2024)
+scores_path <- file.path(final_dir, "ERI_scores_2024_0to1_and_0to100.csv")
+readr::write_csv(eri_scores_2024, scores_path)
+
+cat("\n✅ Files written:\n")
+cat("  • Pre-index inputs:", inputs_path, "\n")
+cat("  • Final scores:     ", scores_path, "\n\n")
+
+
+
+
+
+
+
+####4#########
+
+
+
+# ================================================================
+# Pillar - Sustainability Readiness
+# Electrons Infrastructure Index (EII) — Country Tables & Exports
+# Rebuilds: 
+#   1) Country averages over a recent window (0–1 and 0–100)
+#   2) Latest-year scores per country (0–1 and 0–100)
+# Exports:
+#   - pre-index tidy panel (long)
+#   - final latest-year and country-window tables (CSV)
+# Requirements:
+#   - Data frame `E` with columns: Country, ISO3, Year, EII_year (0–1)
+#   - Vector `RECENT_YEARS` (e.g., 2019:2024)
+# ================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(tidyr)
+  library(stringr)
+})
+
+# -----------------------------
+# 0) Paths (edit if needed)
+# -----------------------------
+data_root    <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
+preindex_dir <- file.path(data_root, "cleaned-Data", "pre-index")
+final_dir    <- file.path(data_root, "cleaned-Data", "FINAL")
+dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
+
+# -----------------------------
+# 1) Input checks & sane defaults
+# -----------------------------
+# Expect `E` in memory. If absent, stop with a helpful message.
+if (!exists("E")) {
+  stop("Object `E` not found. Load your panel with columns: Country, ISO3, Year, EII_year (0–1).")
+}
+
+# Basic column checks
+required_cols <- c("Country", "ISO3", "Year", "EII_year")
+missing_cols  <- setdiff(required_cols, names(E))
+if (length(missing_cols) > 0) {
+  stop("`E` is missing required columns: ", paste(missing_cols, collapse = ", "))
+}
+
+# Ensure types are as expected
+E <- E %>%
+  mutate(
+    Country  = as.character(Country),
+    ISO3     = as.character(ISO3),
+    Year     = as.integer(Year),
+    EII_year = suppressWarnings(as.numeric(EII_year))
+  )
+
+# `RECENT_YEARS`: if not already defined, fall back to last 6 available years
+if (!exists("RECENT_YEARS")) {
+  max_year <- suppressWarnings(max(E$Year, na.rm = TRUE))
+  # Use the last 6 years ending at the max observed
+  RECENT_YEARS <- seq.int(max_year - 5L, max_year, by = 1L)
+  message("`RECENT_YEARS` not supplied. Using default: ", paste(RECENT_YEARS, collapse = ", "))
+}
+
+# Optional safety: clamp EII_year to [0,1] if tiny numerical drift exists
+E <- E %>%
+  mutate(EII_year = ifelse(is.na(EII_year), NA_real_, pmin(pmax(EII_year, 0), 1)))
+
+# -----------------------------
+# 2) Country averages over window
+#    - uses mean of available years within RECENT_YEARS
+#    - reports how many years contributed (years_used)
+# -----------------------------
+EII_country <- E %>%
+  filter(Year %in% RECENT_YEARS) %>%
+  group_by(Country, ISO3) %>%
+  summarise(
+    years_used = sum(!is.na(EII_year)),
+    EII        = ifelse(years_used == 0, NA_real_, mean(EII_year, na.rm = TRUE)),
+    .groups    = "drop"
+  )
+
+# Guard against missing `EII` (catch schema errors early)
+if (!"EII" %in% names(EII_country)) {
+  stop("`EII_country` is missing column `EII`. Check that `EII_year` exists in `E` and re-run.")
+}
+
+# Prepare window summary table (0–1 and 0–100)
+EII_country_out <- EII_country %>%
+  transmute(
+    Country, ISO3, years_used,
+    EII_0_1   = EII,
+    EII_0_100 = round(100 * EII, 1)
+  ) %>%
+  arrange(desc(EII_0_1), Country)
+
+# -----------------------------
+# 3) Latest-year per country
+#    - prefer the most recent year within RECENT_YEARS that has data
+# -----------------------------
+latest_year_by_cty <- E %>%
+  filter(Year %in% RECENT_YEARS & !is.na(EII_year)) %>%
+  group_by(Country, ISO3) %>%
+  summarise(Year = max(Year, na.rm = TRUE), .groups = "drop")
+
+EII_latest <- E %>%
+  inner_join(latest_year_by_cty, by = c("Country", "ISO3", "Year")) %>%
+  mutate(
+    EII_0_1   = EII_year,
+    EII_0_100 = round(100 * EII_year, 1)
+  ) %>%
+  # keep any raw or normalized indicators you built earlier if they match these patterns
+  select(
+    Country, ISO3, Year,
+    matches("_GW$|_TWh$|_MWh$|_pct$|_Mt$|_USD$"),  # raw indicators (optional)
+    ends_with("_norm"),                            # normalized inputs (optional)
+    EII_0_1, EII_0_100
+  ) %>%
+  arrange(desc(EII_0_1), Country)
+
+# -----------------------------
+# 4) Pre-index tidy panel (long)
+#    - convenience export for replication/packages
+# -----------------------------
+E_long_pre <- E %>%
+  pivot_longer(
+    cols = -c(Country, ISO3, Year),
+    names_to  = "Field",
+    values_to = "Value"
+  )
+
+# -----------------------------
+# 5) Exports
+# -----------------------------
+readr::write_csv(E_long_pre,      file.path(preindex_dir, "EII_inputs_panel_long.csv"))
+readr::write_csv(EII_latest,      file.path(final_dir,    "EII_scores_latest_year_0to1_0to100.csv"))
+readr::write_csv(EII_country_out, file.path(final_dir,    "EII_scores_country_0to1_0to100.csv"))
+
+# -----------------------------
+# 6) Console summary
+# -----------------------------
+cat(
+  "\n✅ EII export complete.\n",
+  "Window used (RECENT_YEARS): ", paste(RECENT_YEARS, collapse = ", "), "\n",
+  "Pre-index:\n",
+  "  • ", file.path(preindex_dir, "EII_inputs_panel_long.csv"), "\n",
+  "Final:\n",
+  "  • ", file.path(final_dir, "EII_scores_latest_year_0to1_0to100.csv"), "\n",
+  "  • ", file.path(final_dir, "EII_scores_country_0to1_0to100.csv"), "\n",
+  sep = ""
+)
+
+
+
+
+
+
+#####5######
+# ================================================================
+# Technology Readiness
+# IMFAI → AIPI | GFRI-style Export Logic (pre-index + final)
+# Standard: 0–1 only, snapshot (2023 implied), Technology pillar
+# ================================================================
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+})
+
+# --- Paths
+BASE_DIR   <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
+INPUT_FILE <- file.path(BASE_DIR, "IMFAI_AIPI_only.csv")
+
+# GFRI-style export structure
+DATE_STAMP <- format(Sys.Date(), "%Y%m%d")
+PILLAR     <- "technology"
+IND_CODE   <- "TECH_AIPI"
+YEAR_VAL   <- 2023
+
+DIR_PRE    <- file.path(BASE_DIR, "export", "preindex", PILLAR)
+DIR_FINAL  <- file.path(BASE_DIR, "export", "final",    PILLAR)
+dir.create(DIR_PRE,   recursive = TRUE, showWarnings = FALSE)
+dir.create(DIR_FINAL, recursive = TRUE, showWarnings = FALSE)
+
+# --- Helper: safe min–max scaling
+safe_minmax <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (!is.finite(rng[1]) || !is.finite(rng[2]) || diff(rng) == 0) return(rep(NA_real_, length(x)))
+  (x - rng[1]) / (rng[2] - rng[1])
+}
+
+# --- Load
+raw <- read_csv(INPUT_FILE, show_col_types = FALSE)
+
+# --- Clean + standardize
+df <- raw %>%
+  rename_with(~str_trim(.x)) %>%
+  rename(
+    Country = any_of(c("Country","country","economy","Economy")),
+    ISO3    = any_of(c("ISO3","iso3","iso","ISO")),
+    AIPI    = any_of(c("AIPI","aipi"))
+  ) %>%
+  mutate(
+    Country = as.character(Country),
+    ISO3    = toupper(as.character(ISO3)),
+    AIPI    = suppressWarnings(as.numeric(AIPI))
+  ) %>%
+  filter(!is.na(Country), !is.na(ISO3), !is.na(AIPI)) %>%
+  group_by(Country, ISO3) %>%
+  summarise(AIPI = mean(AIPI, na.rm = TRUE), .groups = "drop")
+
+# --- PRE-INDEX (GFRI: clean + 0–1 only)
+preindex <- df %>%
+  mutate(AIPI_0_1 = safe_minmax(AIPI)) %>%
+  select(Country, ISO3, AIPI_0_1) %>%
+  arrange(desc(AIPI_0_1))
+
+pre_path <- file.path(DIR_PRE, sprintf("AIPI_preindex_snapshot_0to1_%s.csv", DATE_STAMP))
+write_csv(preindex, pre_path)
+
+# --- FINAL (canonical columns for aggregator)
+# GFRI canonical schema (example):
+# ISO3, Country, Year, indicator_code, pillar, value_0_1, source, method_version, run_date
+final <- preindex %>%
+  transmute(
+    ISO3,
+    Country,
+    Year            = YEAR_VAL,
+    indicator_code  = IND_CODE,
+    pillar          = toupper(PILLAR),
+    value_0_1       = AIPI_0_1,
+    source          = "IMF AI Preparedness Index (AIPI) — snapshot",
+    method_version  = "GFRI_norm_v1_minmax",
+    run_date        = as.character(Sys.Date())
+  )
+
+final_path <- file.path(DIR_FINAL, sprintf("%s_final_%d_0to1_%s.csv", IND_CODE, YEAR_VAL, DATE_STAMP))
+write_csv(final, final_path)
+
+message("✅ Pre-index written: ", pre_path)
+message("✅ Final written:    ", final_path)
+
+
+
+#####6####
+
+
+
+
+
+
+
+
+
+
+
