@@ -494,48 +494,210 @@ message("• FINAL lean: ", final_out)
 
 
 #3#####################################################################
+# ================================================================
+# ERI Data Construction Pipeline (Replication Ready)
+# Cleans and assembles inputs into `eri_long` for 2020–2024
+# Handles missing or messy sheets gracefully
+# ================================================================
+
+# ---- Libraries ----
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(readr)
+
+# ---- File path ----
+file_path <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/EIelectron-Stats-Review-ALL-data.xlsx"
+stopifnot(file.exists(file_path))
+
+# ---- Helper: Clean + reshape a sheet ----
+tidy_years <- function(sheet, var_name) {
+  df <- read_excel(file_path, sheet = sheet, skip = 2)
+  
+  country_col <- names(df)[1]
+  year_cols   <- names(df)[str_detect(names(df), "^(19|20)\\d{2}")]
+  
+  if (length(year_cols) == 0) {
+    message("⚠️ Skipping sheet: ", sheet, " (no usable year columns)")
+    return(NULL)
+  }
+  
+  # normalize types to avoid pivot errors
+  df[year_cols] <- lapply(df[year_cols], as.character)
+  
+  df %>%
+    pivot_longer(cols = all_of(year_cols),
+                 names_to = "Year_raw",
+                 values_to = "Value") %>%
+    mutate(
+      Country  = as.character(.data[[country_col]]),
+      Year     = as.integer(str_extract(Year_raw, "^(19|20)\\d{2}")),
+      Variable = var_name,
+      Value    = suppressWarnings(as.numeric(Value))
+    ) %>%
+    filter(!is.na(Year),
+           !is.na(Country),
+           Country != "",
+           !str_starts(Country, "#"),
+           !str_starts(Country, "\\*"),
+           !str_detect(Country, "^Total")) %>%
+    group_by(Country, Year, Variable) %>%
+    summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+}
+
+# ---- Collect ERI input sheets ----
+pieces <- list(
+  tidy_years("Electricity Generation - TWh", "Electricity generation"),
+  tidy_years("Hydro Generation - TWh",        "Hydro generation"),
+  tidy_years("Solar Installed Capacity",      "Solar capacity"),
+  tidy_years("Wind Installed Capacity",       "Wind capacity"),
+  tidy_years("Grid Scale BESS Capacity",      "BESS capacity"),
+  tidy_years("CCUS Capture Capacity",         "CCUS capacity"),
+  tidy_years("Carbon Prices",                 "Carbon price")
+)
+
+# ---- Keep only valid (non-NULL) datasets ----
+valid_pieces <- compact(pieces)
+
+# ---- Assemble master ERI dataset ----
+eri_long <- bind_rows(valid_pieces) %>%
+  filter(Year >= 2020, Year <= 2024) %>%
+  distinct(Country, Year, Variable, .keep_all = TRUE)
+
+message("✅ eri_long built with ", nrow(eri_long), " rows, ",
+        dplyr::n_distinct(eri_long$Country), " countries, ",
+        dplyr::n_distinct(eri_long$Variable), " variables.")
+
+# ---- Coverage summary for replication appendix ----
+summary_info <- eri_long %>%
+  group_by(Variable) %>%
+  summarise(
+    Countries = n_distinct(Country),
+    Years     = paste0(min(Year, na.rm = TRUE), "-", max(Year, na.rm = TRUE)),
+    Obs       = n(),
+    .groups   = "drop"
+  )
+
+print(summary_info, n = Inf)
+
+# ---- Save tidy input dataset ----
+preindex_dir <- file.path(dirname(file_path), "cleaned-Data", "pre-index")
+dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
+
+readr::write_csv(
+  eri_long,
+  file.path(preindex_dir, "ERI_inputs_long_2020_2024.csv")
+)
+
+#########
 
 
 
 
 # ================================================================
-# Pillar - Institutional & Geopolitical Resilience
-
-# ERI scoring with dynamic (drop & re-normalize) weights — 0–1 scale
-# Works with your existing `eri_long` built from non-empty sheets
+# ERI Pipeline: Data Construction → Scoring → Export
+# Robust to missing indicators; reproducible replication script
 # ================================================================
 
-# ---- settings ----
+# ---- Libraries ----
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(readr)
+
+# ---- File path ----
+file_path <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/EIelectron-Stats-Review-ALL-data.xlsx"
+stopifnot(file.exists(file_path))
+
+# ================================================================
+# (A) Data Construction
+# ================================================================
+
+# --- Helper: Clean + reshape any sheet ---
+tidy_years <- function(sheet, var_name) {
+  df <- read_excel(file_path, sheet = sheet, skip = 2)
+  country_col <- names(df)[1]
+  year_cols   <- names(df)[str_detect(names(df), "^(19|20)\\d{2}")]
+  
+  if (length(year_cols) == 0) {
+    message("⚠️ Skipping sheet: ", sheet, " (no usable year columns)")
+    return(NULL)
+  }
+  
+  df[year_cols] <- lapply(df[year_cols], as.character)
+  
+  df %>%
+    pivot_longer(cols = all_of(year_cols),
+                 names_to = "Year_raw",
+                 values_to = "Value") %>%
+    mutate(
+      Country  = as.character(.data[[country_col]]),
+      Year     = as.integer(str_extract(Year_raw, "^(19|20)\\d{2}")),
+      Variable = var_name,
+      Value    = suppressWarnings(as.numeric(Value))
+    ) %>%
+    filter(!is.na(Year),
+           !is.na(Country),
+           Country != "",
+           !str_starts(Country, "#"),
+           !str_starts(Country, "\\*"),
+           !str_detect(Country, "^Total")) %>%
+    group_by(Country, Year, Variable) %>%
+    summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+}
+
+# --- Collect relevant ERI inputs ---
+pieces <- list(
+  tidy_years("Electricity Generation - TWh", "Electricity generation"),
+  tidy_years("Hydro Generation - TWh",        "Hydro generation"),
+  tidy_years("Solar Installed Capacity",      "Solar capacity"),
+  tidy_years("Wind Installed Capacity",       "Wind capacity"),
+  tidy_years("Grid Scale BESS Capacity",      "BESS capacity"),
+  tidy_years("CCUS Capture Capacity",         "CCUS capacity"),
+  tidy_years("Carbon Prices",                 "Carbon price")
+)
+
+# --- Assemble tidy long panel ---
+eri_long <- bind_rows(compact(pieces)) %>%
+  filter(Year >= 2020, Year <= 2024) %>%
+  distinct(Country, Year, Variable, .keep_all = TRUE)
+
+message("✅ eri_long built with ", nrow(eri_long), " rows, ",
+        n_distinct(eri_long$Country), " countries, ",
+        n_distinct(eri_long$Variable), " variables.")
+
+# ================================================================
+# (B) ERI Scoring (safe for missing indicators)
+# ================================================================
+
+# ---- Settings ----
 target_year   <- 2024L
-cf_solar      <- 0.20  # CFs only used if the sheet exists
+cf_solar      <- 0.20
 cf_wind       <- 0.35
 winsor_probs  <- c(0.05, 0.95)
 
-# Pillar target weights (will be re-normalized per row if needed)
 pillar_weights <- c(clean = 0.40, flex = 0.30, policy = 0.30)
-
-# Sub-bucket target weights (also re-normalized per row if needed)
 w_clean  <- c(hydro_share = 0.40, vre_eq_share = 0.60)
 w_flex   <- c(bess_per_twh = 1.00)
-w_policy <- c(ccus_per_twh = 0.50, carbon_price = 0.50)  # carbon_price may be missing
+w_policy <- c(ccus_per_twh = 0.50, carbon_price = 0.50)
 
-# ---- helpers ----
+# ---- Helpers ----
 winsorize_vec <- function(x, probs = c(0.05, 0.95)) {
   if (all(is.na(x))) return(x)
   qs <- stats::quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
   pmin(pmax(x, qs[1]), qs[2])
 }
-
 normalize_minmax_01 <- function(v) {
-  x <- v
-  if (all(is.na(x))) return(rep(NA_real_, length(x)))
-  lo <- min(x, na.rm = TRUE); hi <- max(x, na.rm = TRUE)
-  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(x)))
-  (x - lo) / (hi - lo)
+  if (all(is.na(v))) return(rep(NA_real_, length(v)))
+  lo <- min(v, na.rm = TRUE); hi <- max(v, na.rm = TRUE)
+  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(v)))
+  (v - lo) / (hi - lo)
 }
-
 weighted_bucket_dynamic <- function(values_named, weights_named) {
-  # drop NAs and weights that don't exist; re-normalize remaining weights
   present <- names(values_named)[!is.na(values_named)]
   if (length(present) == 0) return(NA_real_)
   ww <- weights_named[present]
@@ -543,166 +705,133 @@ weighted_bucket_dynamic <- function(values_named, weights_named) {
   sum(values_named[present] * ww)
 }
 
-# ---- (1) Build 2024 features from eri_long ----
-# Note: this is robust to missing indicators (e.g., Wind capacity or Carbon price absent)
+# ---- Build features for 2024 ----
 features_2024 <- eri_long %>%
-  dplyr::filter(Year == target_year) %>%
-  tidyr::pivot_wider(
+  filter(Year == target_year) %>%
+  pivot_wider(
     id_cols  = Country,
     names_from  = Variable,
     values_from = Value,
-    values_fn   = list(Value = ~ suppressWarnings(mean(.x, na.rm = TRUE)))
+    values_fn   = list(Value = ~ mean(.x, na.rm = TRUE))
   ) %>%
-  # Ensure columns exist even if the sheet was absent
-  dplyr::mutate(
-    `Electricity generation` = if (!"Electricity generation" %in% names(.)) NA_real_ else `Electricity generation`,
-    `Hydro generation`       = if (!"Hydro generation"       %in% names(.)) NA_real_ else `Hydro generation`,
-    `Solar capacity`         = if (!"Solar capacity"         %in% names(.)) NA_real_ else `Solar capacity`,
-    `Wind capacity`          = if (!"Wind capacity"          %in% names(.)) NA_real_ else `Wind capacity`,
-    `BESS capacity`          = if (!"BESS capacity"          %in% names(.)) NA_real_ else `BESS capacity`,
-    `CCUS capacity`          = if (!"CCUS capacity"          %in% names(.)) NA_real_ else `CCUS capacity`,
-    `Carbon price`           = if (!"Carbon price"           %in% names(.)) NA_real_ else `Carbon price`
-  ) %>%
-  dplyr::rename(
+  mutate(
     Total_gen_TWh = `Electricity generation`,
     Hydro_TWh     = `Hydro generation`,
     Solar_GW      = `Solar capacity`,
-    Wind_GW       = `Wind capacity`,
+    Wind_GW       = if ("Wind capacity" %in% names(.)) `Wind capacity` else NA_real_,
     BESS_MW       = `BESS capacity`,
-    CCUS_Mt       = `CCUS capacity`,
-    Carbon_price  = `Carbon price`
+    CCUS_Mt       = if ("CCUS capacity" %in% names(.)) `CCUS capacity` else NA_real_,
+    Carbon_price  = if ("Carbon price" %in% names(.)) `Carbon price` else NA_real_
   ) %>%
-  # Derived indicators; use available components only
-  dplyr::mutate(
-    Hydro_share = dplyr::if_else(Total_gen_TWh > 0, Hydro_TWh / Total_gen_TWh, NA_real_),
-    
-    # VRE equivalent TWh from capacity (only solar/wind that exist)
-    VREeq_TWh = {
-      solar_twh <- if (!all(is.na(Solar_GW))) (Solar_GW * cf_solar * 8760) / 1000 else 0
-      wind_twh  <- if (!all(is.na(Wind_GW)))  (Wind_GW  * cf_wind  * 8760) / 1000 else 0
-      # if one tech is fully missing (all NA), its term contributes 0
-      solar_twh[is.na(solar_twh)] <- 0
-      wind_twh[is.na(wind_twh)]   <- 0
-      solar_twh + wind_twh
-    },
-    VREeq_share = dplyr::if_else(Total_gen_TWh > 0, VREeq_TWh / Total_gen_TWh, NA_real_),
-    
-    BESS_per_TWh = dplyr::if_else(Total_gen_TWh > 0, BESS_MW / Total_gen_TWh, NA_real_),
-    CCUS_per_TWh = dplyr::if_else(Total_gen_TWh > 0, CCUS_Mt  / Total_gen_TWh, NA_real_)
+  mutate(
+    Hydro_share   = if_else(Total_gen_TWh > 0, Hydro_TWh / Total_gen_TWh, NA_real_),
+    VREeq_TWh     = coalesce((Solar_GW * cf_solar * 8760) / 1000, 0) +
+      coalesce((Wind_GW  * cf_wind  * 8760) / 1000, 0),
+    VREeq_share   = if_else(Total_gen_TWh > 0, VREeq_TWh / Total_gen_TWh, NA_real_),
+    BESS_per_TWh  = if_else(Total_gen_TWh > 0, BESS_MW / Total_gen_TWh, NA_real_),
+    CCUS_per_TWh  = if_else(Total_gen_TWh > 0, CCUS_Mt  / Total_gen_TWh, NA_real_)
   )
 
-# ---- (2) Normalize indicators (winsorize then min-max -> 0..1) ----
-# Decide which indicators actually exist (non-all-NA)
-indicator_defs <- c(
-  "Hydro_share",
-  "VREeq_share",
-  "BESS_per_TWh",
-  "CCUS_per_TWh",
-  "Carbon_price"
-)
+# ---- Normalize indicators ----
+indicator_defs <- c("Hydro_share","VREeq_share","BESS_per_TWh","CCUS_per_TWh","Carbon_price")
 
-normed <- features_2024
 for (ind in indicator_defs) {
-  if (!ind %in% names(normed)) {
-    normed[[paste0(ind, "_n01")]] <- NA_real_
+  if (!ind %in% names(features_2024)) {
+    features_2024[[paste0(ind, "_n01")]] <- NA_real_
     next
   }
-  v <- normed[[ind]]
-  if (all(is.na(v))) {
-    normed[[paste0(ind, "_n01")]] <- NA_real_
-  } else {
-    v_w <- winsorize_vec(v, winsor_probs)
-    normed[[paste0(ind, "_n01")]] <- normalize_minmax_01(v_w)
-  }
+  v <- features_2024[[ind]]
+  features_2024[[paste0(ind, "_n01")]] <- if (all(is.na(v))) NA_real_ else normalize_minmax_01(winsorize_vec(v, winsor_probs))
 }
 
-# ---- (3) Sub-scores with dynamic re-weighting per country ----
-normed <- normed %>%
+# ---- Sub-scores ----
+features_2024 <- features_2024 %>%
   rowwise() %>%
   mutate(
-    # CLEAN pillar (drop missing, re-weight)
-    score_clean = weighted_bucket_dynamic(
-      c(
-        hydro_share = Hydro_share_n01,
-        vre_eq_share = VREeq_share_n01
-      ),
-      w_clean
-    ),
-    
-    # FLEX pillar
-    score_flex = weighted_bucket_dynamic(
-      c(
-        bess_per_twh = BESS_per_TWh_n01
-      ),
-      w_flex
-    ),
-    
-    # POLICY pillar (carbon_price often missing; drop+re-weight to CCUS only if needed)
-    score_policy = weighted_bucket_dynamic(
-      c(
-        ccus_per_twh = CCUS_per_TWh_n01,
-        carbon_price = Carbon_price_n01
-      ),
-      w_policy
-    )
+    score_clean  = weighted_bucket_dynamic(c(hydro_share = Hydro_share_n01,
+                                             vre_eq_share = VREeq_share_n01), w_clean),
+    score_flex   = weighted_bucket_dynamic(c(bess_per_twh = BESS_per_TWh_n01), w_flex),
+    score_policy = weighted_bucket_dynamic(c(ccus_per_twh = CCUS_per_TWh_n01,
+                                             carbon_price = Carbon_price_n01), w_policy)
   ) %>%
   ungroup()
 
-# ---- (4) Final ERI score (0..1) with dynamic pillar re-weighting per country ----
-normed$ERI_0_1 <- apply(normed[, c("score_clean", "score_flex", "score_policy")], 1, function(rr) {
-  names(rr) <- c("clean", "flex", "policy")
+# ---- Final ERI scores ----
+features_2024$ERI_0_1   <- apply(features_2024[, c("score_clean","score_flex","score_policy")], 1, function(rr) {
+  names(rr) <- c("clean","flex","policy")
   m <- !is.na(rr)
   if (!any(m)) return(NA_real_)
   ww <- pillar_weights[m] / sum(pillar_weights[m])
   sum(rr[m] * ww)
 })
+features_2024$ERI_0_100 <- features_2024$ERI_0_1 * 100
 
-# (optional) also a 0–100 version, if you want to export alongside
-normed$ERI_0_100 <- normed$ERI_0_1 * 100
-
-# ---- (5) Tidy output ----
-eri_scores_2024 <- normed %>%
-  dplyr::transmute(
+# ---- Tidy output ----
+eri_scores_2024 <- features_2024 %>%
+  transmute(
     Country,
     Year = target_year,
-    Hydro_share,        VREeq_share,        BESS_per_TWh,        CCUS_per_TWh,        Carbon_price,
-    Hydro_share_n01,    VREeq_share_n01,    BESS_per_TWh_n01,    CCUS_per_TWh_n01,    Carbon_price_n01,
+    Hydro_share, VREeq_share, BESS_per_TWh, CCUS_per_TWh, Carbon_price,
+    Hydro_share_n01, VREeq_share_n01, BESS_per_TWh_n01, CCUS_per_TWh_n01, Carbon_price_n01,
     score_clean, score_flex, score_policy,
     ERI_0_1, ERI_0_100
   ) %>%
-  dplyr::arrange(desc(ERI_0_1))
+  arrange(desc(ERI_0_1))
 
-message("\n✅ ERI scores computed (0–1 and 0–100). Preview:")
+message("✅ ERI scores computed. Top preview:")
 print(head(eri_scores_2024, 10))
 
-# ---- (6) Save (optional) ----
-# readr::write_csv(eri_scores_2024, file.path(export_dir, "ERI_scores_2024_0to1_and_0to100.csv"))
-
-
 # ================================================================
-# Save outputs to pre-index + final folders (original structure)
+# (C) Save Outputs
 # ================================================================
-
-# Derive base dir from the Excel file path, then mirror your structure
-base_dir     <- dirname(file_path)  # "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
+base_dir     <- dirname(file_path)
 preindex_dir <- file.path(base_dir, "cleaned-Data", "pre-index")
 final_dir    <- file.path(base_dir, "cleaned-Data", "FINAL")
-
 dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
-dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
+dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
-# 1) Pre-index inputs (the long, tidy data you read for 2020–2024)
-#    If your working long df is named something else, replace `eri_long` below.
-inputs_path <- file.path(preindex_dir, "ERI_inputs_long_2020_2024.csv")
-readr::write_csv(eri_long, inputs_path)
-
-# 2) Final scores (0–1 and 0–100 for 2024)
-scores_path <- file.path(final_dir, "ERI_scores_2024_0to1_and_0to100.csv")
-readr::write_csv(eri_scores_2024, scores_path)
+# Save inputs
+write_csv(eri_long,  file.path(preindex_dir, "ERI_inputs_long_2020_2024.csv"))
+# Save final scores
+write_csv(eri_scores_2024, file.path(final_dir, "ERI_scores_2024_0to1_and_0to100.csv"))
 
 cat("\n✅ Files written:\n")
-cat("  • Pre-index inputs:", inputs_path, "\n")
-cat("  • Final scores:     ", scores_path, "\n\n")
+cat("  • Pre-index inputs:", file.path(preindex_dir, "ERI_inputs_long_2020_2024.csv"), "\n")
+cat("  • Final scores:     ", file.path(final_dir, "ERI_scores_2024_0to1_and_0to100.csv"), "\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -713,259 +842,267 @@ cat("  • Final scores:     ", scores_path, "\n\n")
 ####4#########
 
 
-
 # ================================================================
-# Pillar - Sustainability Readiness
-# Electrons Infrastructure Index (EII) — Country Tables & Exports
-# Rebuilds: 
-#   1) Country averages over a recent window (0–1 and 0–100)
-#   2) Latest-year scores per country (0–1 and 0–100)
-# Exports:
-#   - pre-index tidy panel (long)
-#   - final latest-year and country-window tables (CSV)
-# Requirements:
-#   - Data frame `E` with columns: Country, ISO3, Year, EII_year (0–1)
-#   - Vector `RECENT_YEARS` (e.g., 2019:2024)
+# GVC Development Report 2025 - Sustainability Readiness Pillar
+# ELECTRONS INFRASTRUCTURE INDEX (EII) - FULL PIPELINE
+# ================================================================
+# Author: Anthony S Cano Moncada
+# Description:
+#   Cleans and transforms raw Ember/WRI "Energy.csv" dataset,
+#   builds normalized indicators, computes EII scores (0–1, 0–100),
+#   and exports replication-ready outputs.
 # ================================================================
 
 suppressPackageStartupMessages({
   library(dplyr)
-  library(readr)
   library(tidyr)
   library(stringr)
+  library(readr)
+  library(janitor)
 })
 
 # -----------------------------
-# 0) Paths (edit if needed)
+# 0) Paths
 # -----------------------------
 data_root    <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
+energy_file  <- file.path(data_root, "Energy.csv")
 preindex_dir <- file.path(data_root, "cleaned-Data", "pre-index")
 final_dir    <- file.path(data_root, "cleaned-Data", "FINAL")
 dir.create(preindex_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(final_dir,    recursive = TRUE, showWarnings = FALSE)
 
 # -----------------------------
-# 1) Input checks & sane defaults
+# 1) Load data
 # -----------------------------
-# Expect `E` in memory. If absent, stop with a helpful message.
-if (!exists("E")) {
-  stop("Object `E` not found. Load your panel with columns: Country, ISO3, Year, EII_year (0–1).")
-}
-
-# Basic column checks
-required_cols <- c("Country", "ISO3", "Year", "EII_year")
-missing_cols  <- setdiff(required_cols, names(E))
-if (length(missing_cols) > 0) {
-  stop("`E` is missing required columns: ", paste(missing_cols, collapse = ", "))
-}
-
-# Ensure types are as expected
-E <- E %>%
+E0 <- read_csv(energy_file, show_col_types = FALSE) %>%
+  clean_names() %>%
+  rename(
+    Country = area,
+    ISO3    = iso_3_code
+  ) %>%
   mutate(
-    Country  = as.character(Country),
-    ISO3     = as.character(ISO3),
-    Year     = as.integer(Year),
-    EII_year = suppressWarnings(as.numeric(EII_year))
+    Year = as.integer(year),
+    Variable = str_trim(variable),
+    Unit     = str_trim(unit)
   )
 
-# `RECENT_YEARS`: if not already defined, fall back to last 6 available years
-if (!exists("RECENT_YEARS")) {
-  max_year <- suppressWarnings(max(E$Year, na.rm = TRUE))
-  # Use the last 6 years ending at the max observed
-  RECENT_YEARS <- seq.int(max_year - 5L, max_year, by = 1L)
-  message("`RECENT_YEARS` not supplied. Using default: ", paste(RECENT_YEARS, collapse = ", "))
+# -----------------------------
+# 2) Total generation (TWh)
+# -----------------------------
+gen_total <- E0 %>%
+  filter(Variable == "Total Generation", Unit == "TWh") %>%
+  select(Country, ISO3, Year, total_gen_twh = value)
+
+# -----------------------------
+# 3) Generation components (TWh)
+# -----------------------------
+components <- E0 %>%
+  filter(
+    Variable %in% c("Coal","Gas","Other Fossil",
+                    "Hydro","Wind","Solar",
+                    "Bioenergy","Other Renewables"),
+    Unit == "TWh"
+  ) %>%
+  mutate(var_clean = make_clean_names(Variable)) %>%
+  select(Country, ISO3, Year, var_clean, value) %>%
+  pivot_wider(names_from = var_clean, values_from = value, values_fill = 0)
+
+# -----------------------------
+# 4) Emissions intensity / Net imports / Demand per capita
+# -----------------------------
+co2_intensity <- E0 %>%
+  filter(Variable == "CO2 intensity") %>%
+  select(Country, ISO3, Year, co2_intensity = value)
+
+net_imports <- E0 %>%
+  filter(Variable == "Net Imports", Unit == "TWh") %>%
+  select(Country, ISO3, Year, net_imports_twh = value)
+
+demand_pc <- E0 %>%
+  filter(Variable == "Demand per capita", Unit == "MWh") %>%
+  select(Country, ISO3, Year, demand_pc_mwh = value)
+
+# -----------------------------
+# 5) Assemble panel
+# -----------------------------
+panel <- gen_total %>%
+  full_join(components,   by = c("Country","ISO3","Year")) %>%
+  full_join(co2_intensity, by = c("Country","ISO3","Year")) %>%
+  full_join(net_imports,   by = c("Country","ISO3","Year")) %>%
+  full_join(demand_pc,     by = c("Country","ISO3","Year"))
+
+# guarantee component cols exist
+expected_comp <- c("coal","gas","other_fossil","hydro","wind","solar","bioenergy","other_renewables")
+for (nm in expected_comp) if (!nm %in% names(panel)) panel[[nm]] <- 0
+
+# compute derived totals/shares
+panel <- panel %>%
+  mutate(
+    fossil_twh      = coalesce(coal,0) + coalesce(gas,0) + coalesce(other_fossil,0),
+    clean_twh       = coalesce(hydro,0) + coalesce(wind,0) + coalesce(solar,0) +
+                      coalesce(bioenergy,0) + coalesce(other_renewables,0),
+    fossil_share_gen = if_else(total_gen_twh > 0, fossil_twh / total_gen_twh, NA_real_),
+    clean_share_gen  = if_else(total_gen_twh > 0, clean_twh  / total_gen_twh, NA_real_),
+    imports_share_gen = if_else(total_gen_twh > 0, net_imports_twh / total_gen_twh, NA_real_)
+  )
+
+# -----------------------------
+# 6) Winsorize + normalize
+# -----------------------------
+winsorize_vec <- function(x, probs = c(0.05, 0.95)) {
+  if (all(is.na(x))) return(x)
+  qs <- quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
+  pmin(pmax(x, qs[1]), qs[2])
+}
+normalize_01 <- function(v) {
+  if (all(is.na(v))) return(rep(NA_real_, length(v)))
+  lo <- min(v, na.rm = TRUE); hi <- max(v, na.rm = TRUE)
+  if (!is.finite(lo) || !is.finite(hi) || lo == hi) return(rep(0.5, length(v)))
+  (v - lo) / (hi - lo)
 }
 
-# Optional safety: clamp EII_year to [0,1] if tiny numerical drift exists
-E <- E %>%
-  mutate(EII_year = ifelse(is.na(EII_year), NA_real_, pmin(pmax(EII_year, 0), 1)))
+# chosen indicators
+raw_list <- list(
+  clean_share_gen     = list(dir = "pos"),
+  fossil_share_gen    = list(dir = "neg"),
+  co2_intensity       = list(dir = "neg"),
+  imports_share_gen   = list(dir = "neg"),
+  demand_pc_mwh       = list(dir = "pos")   # optional
+)
+
+normed <- panel
+for (nm in names(raw_list)) {
+  if (!nm %in% names(normed)) normed[[nm]] <- NA_real_
+  x <- normed[[nm]]
+  x_w <- winsorize_vec(x)
+  x_n <- normalize_01(x_w)
+  if (raw_list[[nm]]$dir == "neg") x_n <- ifelse(is.na(x_n), NA_real_, 1 - x_n)
+  normed[[paste0(nm, "_n01")]] <- x_n
+}
 
 # -----------------------------
-# 2) Country averages over window
-#    - uses mean of available years within RECENT_YEARS
-#    - reports how many years contributed (years_used)
+# 7) Scoring (EII_year)
 # -----------------------------
+weights <- c(
+  clean_share_gen_n01   = 0.30,
+  fossil_share_gen_n01  = 0.25,
+  co2_intensity_n01     = 0.25,
+  imports_share_gen_n01 = 0.10,
+  demand_pc_mwh_n01     = 0.10
+)
+
+weighted_bucket_dynamic <- function(values_named, weights_named) {
+  present <- names(values_named)[!is.na(values_named)]
+  if (length(present) == 0) return(NA_real_)
+  ww <- weights_named[present]; ww <- ww / sum(ww)
+  sum(values_named[present] * ww)
+}
+
+normed <- normed %>%
+  rowwise() %>%
+  mutate(
+    EII_year = weighted_bucket_dynamic(
+      c(
+        clean_share_gen_n01   = clean_share_gen_n01,
+        fossil_share_gen_n01  = fossil_share_gen_n01,
+        co2_intensity_n01     = co2_intensity_n01,
+        imports_share_gen_n01 = imports_share_gen_n01,
+        demand_pc_mwh_n01     = demand_pc_mwh_n01
+      ),
+      weights
+    )
+  ) %>%
+  ungroup()
+
+# -----------------------------
+# 8) Build final E object
+# -----------------------------
+E <- normed %>%
+  select(Country, ISO3, Year, total_gen_twh,
+         clean_share_gen_n01, fossil_share_gen_n01,
+         co2_intensity_n01, imports_share_gen_n01, demand_pc_mwh_n01,
+         EII_year)
+
+# -----------------------------
+# 9) RECENT_YEARS, country averages & latest year
+# -----------------------------
+finite_years <- E$Year[is.finite(E$Year)]
+max_year <- max(finite_years, na.rm = TRUE)
+RECENT_YEARS <- seq.int(max_year - 5L, max_year, by = 1L)
+
 EII_country <- E %>%
   filter(Year %in% RECENT_YEARS) %>%
   group_by(Country, ISO3) %>%
   summarise(
     years_used = sum(!is.na(EII_year)),
     EII        = ifelse(years_used == 0, NA_real_, mean(EII_year, na.rm = TRUE)),
-    .groups    = "drop"
-  )
-
-# Guard against missing `EII` (catch schema errors early)
-if (!"EII" %in% names(EII_country)) {
-  stop("`EII_country` is missing column `EII`. Check that `EII_year` exists in `E` and re-run.")
-}
-
-# Prepare window summary table (0–1 and 0–100)
-EII_country_out <- EII_country %>%
+    .groups = "drop"
+  ) %>%
   transmute(
     Country, ISO3, years_used,
     EII_0_1   = EII,
     EII_0_100 = round(100 * EII, 1)
-  ) %>%
-  arrange(desc(EII_0_1), Country)
+  )
 
-# -----------------------------
-# 3) Latest-year per country
-#    - prefer the most recent year within RECENT_YEARS that has data
-# -----------------------------
 latest_year_by_cty <- E %>%
   filter(Year %in% RECENT_YEARS & !is.na(EII_year)) %>%
   group_by(Country, ISO3) %>%
-  summarise(Year = max(Year, na.rm = TRUE), .groups = "drop")
+  summarise(Year = max(Year), .groups = "drop")
 
 EII_latest <- E %>%
-  inner_join(latest_year_by_cty, by = c("Country", "ISO3", "Year")) %>%
+  inner_join(latest_year_by_cty, by = c("Country","ISO3","Year")) %>%
   mutate(
     EII_0_1   = EII_year,
     EII_0_100 = round(100 * EII_year, 1)
-  ) %>%
-  # keep any raw or normalized indicators you built earlier if they match these patterns
-  select(
-    Country, ISO3, Year,
-    matches("_GW$|_TWh$|_MWh$|_pct$|_Mt$|_USD$"),  # raw indicators (optional)
-    ends_with("_norm"),                            # normalized inputs (optional)
-    EII_0_1, EII_0_100
-  ) %>%
-  arrange(desc(EII_0_1), Country)
-
-# -----------------------------
-# 4) Pre-index tidy panel (long)
-#    - convenience export for replication/packages
-# -----------------------------
-E_long_pre <- E %>%
-  pivot_longer(
-    cols = -c(Country, ISO3, Year),
-    names_to  = "Field",
-    values_to = "Value"
   )
 
 # -----------------------------
-# 5) Exports
+# 10) Exports
 # -----------------------------
-readr::write_csv(E_long_pre,      file.path(preindex_dir, "EII_inputs_panel_long.csv"))
-readr::write_csv(EII_latest,      file.path(final_dir,    "EII_scores_latest_year_0to1_0to100.csv"))
-readr::write_csv(EII_country_out, file.path(final_dir,    "EII_scores_country_0to1_0to100.csv"))
+E_long_pre <- E %>%
+  pivot_longer(-c(Country, ISO3, Year),
+               names_to = "Field", values_to = "Value")
 
-# -----------------------------
-# 6) Console summary
-# -----------------------------
-cat(
-  "\n✅ EII export complete.\n",
-  "Window used (RECENT_YEARS): ", paste(RECENT_YEARS, collapse = ", "), "\n",
-  "Pre-index:\n",
-  "  • ", file.path(preindex_dir, "EII_inputs_panel_long.csv"), "\n",
-  "Final:\n",
-  "  • ", file.path(final_dir, "EII_scores_latest_year_0to1_0to100.csv"), "\n",
-  "  • ", file.path(final_dir, "EII_scores_country_0to1_0to100.csv"), "\n",
-  sep = ""
-)
+write_csv(E_long_pre,      file.path(preindex_dir, "EII_inputs_panel_long.csv"))
+write_csv(EII_latest,      file.path(final_dir,    "EII_scores_latest_year_0to1_0to100.csv"))
+write_csv(EII_country,     file.path(final_dir,    "EII_scores_country_0to1_0to100.csv"))
 
-
+cat("\n✅ Electrons Infrastructure Index (EII) pipeline complete.\n",
+    "Window (RECENT_YEARS): ", paste(RECENT_YEARS, collapse = ", "), "\n",
+    "Pre-index panel:\n   • ", file.path(preindex_dir, "EII_inputs_panel_long.csv"), "\n",
+    "Final outputs:\n   • ", file.path(final_dir, "EII_scores_latest_year_0to1_0to100.csv"), "\n",
+    "   • ", file.path(final_dir, "EII_scores_country_0to1_0to100.csv"), "\n",
+    sep = "")
 
 
 
 
 #####5######
-# ================================================================
-# Technology Readiness
-# IMFAI → AIPI | GFRI-style Export Logic (pre-index + final)
-# Standard: 0–1 only, snapshot (2023 implied), Technology pillar
-# ================================================================
 
 suppressPackageStartupMessages({
-  library(readr)
+  library(readxl)
   library(dplyr)
-  library(stringr)
 })
 
-# --- Paths
-BASE_DIR   <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX"
-INPUT_FILE <- file.path(BASE_DIR, "IMFAI_AIPI_only.csv")
+file_path <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/IMFAI.xlsx"
 
-# GFRI-style export structure
-DATE_STAMP <- format(Sys.Date(), "%Y%m%d")
-PILLAR     <- "technology"
-IND_CODE   <- "TECH_AIPI"
-YEAR_VAL   <- 2023
+# --- Load sheet, skipping first row ---
+raw <- read_excel(file_path, sheet = "AIPI", skip = 1)
 
-DIR_PRE    <- file.path(BASE_DIR, "export", "preindex", PILLAR)
-DIR_FINAL  <- file.path(BASE_DIR, "export", "final",    PILLAR)
-dir.create(DIR_PRE,   recursive = TRUE, showWarnings = FALSE)
-dir.create(DIR_FINAL, recursive = TRUE, showWarnings = FALSE)
+# --- Keep only original values: Country, ISO3, AIPI + add Year ---
+aipi_final <- raw %>%
+  select(Country, iso3, AIPI) %>%      # keep only needed columns
+  rename(ISO3 = iso3) %>%              # rename for consistency
+  mutate(Year = 2023) %>%              # add fixed year
+  filter(!is.na(Country), !is.na(ISO3), !is.na(AIPI))
 
-# --- Helper: safe min–max scaling
-safe_minmax <- function(x) {
-  rng <- range(x, na.rm = TRUE)
-  if (!is.finite(rng[1]) || !is.finite(rng[2]) || diff(rng) == 0) return(rep(NA_real_, length(x)))
-  (x - rng[1]) / (rng[2] - rng[1])
-}
+# --- Preview ---
+head(aipi_final, 10)
 
-# --- Load
-raw <- read_csv(INPUT_FILE, show_col_types = FALSE)
+# --- Save ---
+out_file <- "/Volumes/VALEN/New Folder With Items 2/Update GVC INDEX/cleaned-Data/AIPI_2023.csv"
+readr::write_csv(aipi_final, out_file)
 
-# --- Clean + standardize
-df <- raw %>%
-  rename_with(~str_trim(.x)) %>%
-  rename(
-    Country = any_of(c("Country","country","economy","Economy")),
-    ISO3    = any_of(c("ISO3","iso3","iso","ISO")),
-    AIPI    = any_of(c("AIPI","aipi"))
-  ) %>%
-  mutate(
-    Country = as.character(Country),
-    ISO3    = toupper(as.character(ISO3)),
-    AIPI    = suppressWarnings(as.numeric(AIPI))
-  ) %>%
-  filter(!is.na(Country), !is.na(ISO3), !is.na(AIPI)) %>%
-  group_by(Country, ISO3) %>%
-  summarise(AIPI = mean(AIPI, na.rm = TRUE), .groups = "drop")
-
-# --- PRE-INDEX (GFRI: clean + 0–1 only)
-preindex <- df %>%
-  mutate(AIPI_0_1 = safe_minmax(AIPI)) %>%
-  select(Country, ISO3, AIPI_0_1) %>%
-  arrange(desc(AIPI_0_1))
-
-pre_path <- file.path(DIR_PRE, sprintf("AIPI_preindex_snapshot_0to1_%s.csv", DATE_STAMP))
-write_csv(preindex, pre_path)
-
-# --- FINAL (canonical columns for aggregator)
-# GFRI canonical schema (example):
-# ISO3, Country, Year, indicator_code, pillar, value_0_1, source, method_version, run_date
-final <- preindex %>%
-  transmute(
-    ISO3,
-    Country,
-    Year            = YEAR_VAL,
-    indicator_code  = IND_CODE,
-    pillar          = toupper(PILLAR),
-    value_0_1       = AIPI_0_1,
-    source          = "IMF AI Preparedness Index (AIPI) — snapshot",
-    method_version  = "GFRI_norm_v1_minmax",
-    run_date        = as.character(Sys.Date())
-  )
-
-final_path <- file.path(DIR_FINAL, sprintf("%s_final_%d_0to1_%s.csv", IND_CODE, YEAR_VAL, DATE_STAMP))
-write_csv(final, final_path)
-
-message("✅ Pre-index written: ", pre_path)
-message("✅ Final written:    ", final_path)
-
-
+message("Final AIPI (2023, raw values, restructured) saved to: ", out_file)
 
 #####6####
-
-
-
-
-
-
-
-
-
-
-
